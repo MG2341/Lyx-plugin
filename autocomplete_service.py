@@ -34,6 +34,10 @@ class AutocompleteService:
         self.keystroke_buffer = ""
         self.debounce_delay = 0.2  # seconds
         
+        # Selection mode - NEW
+        self.is_selection_mode = False
+        self.current_prefix = ""
+        
         # Current suggestions
         self.current_suggestions: List[Tuple[str, str]] = []
         self.selected_index = 0
@@ -62,8 +66,8 @@ class AutocompleteService:
         
         self.is_listening = True
         print("\n[OK] Autocomplete service is ready!")
-        print("Press Ctrl+\ to suggest completions")
-        print("Use Ctrl+] or Ctrl+[ to navigate suggestions")
+        print(r"Press Ctrl+\ to suggest completions")
+        print(r"Use Ctrl+] or Ctrl+[ to navigate suggestions")
         print("Press Space to accept, Escape to cancel\n")
         
         # Set up keyboard listener
@@ -74,22 +78,43 @@ class AutocompleteService:
         if keyboard is None:
             return
         
-        def on_press(key: keyboard.Key) -> None:
+        def on_press(key) -> None:
             """Handle key press events."""
             try:
-                # Ctrl+\ to trigger suggestions
+                # F8 to trigger suggestions
                 if self._is_ctrl_backslash(key):
-                    self._on_suggest_trigger()
+                    if self.is_selection_mode:
+                        # If already in selection mode, cancel it
+                        self.is_selection_mode = False
+                        self.current_suggestions = []
+                        print("[Selection Mode Cancelled]")
+                    else:
+                        self._on_suggest_trigger()
                 
-                # Track regular keystrokes for buffer
-                if hasattr(key, 'char') and key.char:
+                # Handle numeric key selection in selection mode
+                elif self.is_selection_mode and self._is_numeric_key(key):
+                    num = self._get_numeric_key_value(key)
+                    if 1 <= num <= len(self.current_suggestions):
+                        self.apply_selected_suggestion(num - 1)
+                        self.is_selection_mode = False
+                        self.current_suggestions = []
+                
+                # Handle Escape to cancel selection mode
+                elif self.is_selection_mode and self._is_escape_key(key):
+                    self.is_selection_mode = False
+                    self.current_suggestions = []
+                    print("[Selection Mode Cancelled]")
+                
+                # Track regular keystrokes for buffer (only if NOT in selection mode)
+                elif not self.is_selection_mode and hasattr(key, 'char') and key.char:
                     self.keystroke_buffer += key.char
                     self.last_keystroke_time = time.time()
+                    print(f"[DEBUG] Keystroke: '{key.char}', buffer: '{self.keystroke_buffer}'")
             
             except Exception as e:
                 print(f"Error in keyboard handler: {e}")
         
-        def on_release(key: keyboard.Key) -> None:
+        def on_release(key) -> None:
             """Handle key release events."""
             pass
         
@@ -97,17 +122,43 @@ class AutocompleteService:
         listener.start()
     
     def _is_ctrl_backslash(self, key) -> bool:
-        """Check if the pressed key is Ctrl+Backslash."""
+        """Check if the pressed key is F8 (trigger key)."""
         try:
-            # This is a simplified check - adjust based on your trigger preference
             if isinstance(key, keyboard.Key):
-                return key == keyboard.Key.f8  # Use F8 as trigger for now (easier to detect)
+                return key == keyboard.Key.f8
+            return False
+        except:
+            return False
+    
+    def _is_numeric_key(self, key) -> bool:
+        """Check if the key is a numeric key (1-5)."""
+        try:
+            if hasattr(key, 'char') and key.char:
+                return key.char in '12345'
+            return False
+        except:
+            return False
+    
+    def _get_numeric_key_value(self, key) -> int:
+        """Get the numeric value from a numeric key."""
+        try:
+            if hasattr(key, 'char') and key.char:
+                return int(key.char)
+            return 0
+        except:
+            return 0
+    
+    def _is_escape_key(self, key) -> bool:
+        """Check if the key is Escape."""
+        try:
+            if isinstance(key, keyboard.Key):
+                return key == keyboard.Key.esc
             return False
         except:
             return False
     
     def _on_suggest_trigger(self) -> None:
-        """Handle the suggestion trigger (Ctrl+\\ or hotkey)."""
+        """Handle the suggestion trigger (F8) - shows menu without auto-applying."""
         print("\n[Autocomplete Triggered]")
         
         if not self.helper.is_ready():
@@ -115,36 +166,77 @@ class AutocompleteService:
             return
         
         # Get suggestions based on current keystroke buffer
-        # In a real implementation, you'd get the actual buffer from LyX
         prefix = self.keystroke_buffer.split()[-1] if self.keystroke_buffer else ""
+        print(f"[DEBUG] Current buffer: '{self.keystroke_buffer}', prefix: '{prefix}', len={len(prefix)}")
         
-        if not prefix or len(prefix) < 2:
-            print("Type at least 2 characters to get suggestions")
+        if not prefix or len(prefix) < 1:
+            print("Type at least 1 character to get suggestions")
             return
         
         suggestions = self.engine.get_suggestions(prefix)
         
         if not suggestions:
             print(f"No suggestions for '{prefix}'")
+            self.keystroke_buffer = ""
             return
         
+        # Store suggestions and enter selection mode
         self.current_suggestions = suggestions
+        self.current_prefix = prefix
         self.selected_index = 0
+        self.is_selection_mode = True
         
         # Display suggestions
         self._show_suggestions()
     
+    def apply_selected_suggestion(self, index: int) -> None:
+        """Apply a selected suggestion to LyX."""
+        if not (0 <= index < len(self.current_suggestions)):
+            print(f"[ERROR] Invalid selection index: {index}")
+            return
+        
+        try:
+            display, replacement = self.current_suggestions[index]
+            print(f"\n[Applying] {display}")
+            print(f"[DEBUG] Using prefix '{self.current_prefix}' (len={len(self.current_prefix)}) for deletion")
+            
+            if not self.helper.is_ready():
+                print("[ERROR] LyX is not accessible")
+                return
+            
+            success = self.helper.apply_suggestion(self.current_prefix, replacement)
+            
+            if success:
+                print("[OK] Suggestion applied!")
+                # Remove the numeric key the user pressed to choose the option
+                # so that it doesn't remain in the LyX document.
+                try:
+                    # Small delay to let the insertion complete
+                    import time
+                    time.sleep(0.05)
+                    self.lyx_client.delete_backward(1)
+                    print("[DEBUG] Deleted selection digit from LyX")
+                except Exception as e:
+                    print(f"[WARNING] Failed to delete selection digit: {e}")
+                # Clear buffer after successful application
+                self.keystroke_buffer = ""
+            else:
+                print("[ERROR] Failed to apply suggestion")
+        
+        except Exception as e:
+            print(f"[ERROR] Exception while applying suggestion: {e}")
+            import traceback
+            traceback.print_exc()
+    
     def _show_suggestions(self) -> None:
-        """Display current suggestions to the user."""
+        """Display current suggestions and wait for selection."""
         if not self.current_suggestions:
             return
         
-        print("\n[Suggestions]")
+        print("\n[Suggestions - Press 1-5 to select, ESC to cancel]")
         for i, (display, _) in enumerate(self.current_suggestions[:5]):
             marker = "→ " if i == self.selected_index else "  "
             print(f"{marker}{i+1}. {display}")
-        
-        print("\nPress: 1-5 to select, Esc to cancel")
     
     def run_interactive_mode(self) -> None:
         """Run in interactive mode for testing without keyboard listener."""
@@ -207,6 +299,10 @@ def main():
             # Test LyX connectivity
             print(f"Testing LyX connection...")
             print(f"LyX home: {service.lyx_client.lyx_home}")
+            print(f"Pipe path: {service.lyx_client.pipe_in}")
+            import os
+            pipe_exists = os.path.exists(service.lyx_client.pipe_in)
+            print(f"Pipe file exists: {pipe_exists}")
             print(f"Accessible: {service.helper.is_ready()}")
         else:
             print(f"Unknown argument: {sys.argv[1]}")
