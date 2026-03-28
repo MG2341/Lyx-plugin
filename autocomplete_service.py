@@ -131,21 +131,38 @@ class AutocompleteService:
             return False
     
     def _is_numeric_key(self, key) -> bool:
-        """Check if the key is a numeric key (1-5)."""
+        """Check if the key is a selection key (F1-F5)."""
         try:
-            if hasattr(key, 'char') and key.char:
-                return key.char in '12345'
+            if keyboard is None:
+                return False
+            if isinstance(key, keyboard.Key):
+                return key in (
+                    keyboard.Key.f1,
+                    keyboard.Key.f2,
+                    keyboard.Key.f3,
+                    keyboard.Key.f4,
+                    keyboard.Key.f5,
+                )
             return False
-        except:
+        except Exception:
             return False
     
     def _get_numeric_key_value(self, key) -> int:
-        """Get the numeric value from a numeric key."""
+        """Map selection key (F1-F5) to a number 1-5."""
         try:
-            if hasattr(key, 'char') and key.char:
-                return int(key.char)
+            if keyboard is None:
+                return 0
+            if isinstance(key, keyboard.Key):
+                mapping = {
+                    keyboard.Key.f1: 1,
+                    keyboard.Key.f2: 2,
+                    keyboard.Key.f3: 3,
+                    keyboard.Key.f4: 4,
+                    keyboard.Key.f5: 5,
+                }
+                return mapping.get(key, 0)
             return 0
-        except:
+        except Exception:
             return 0
     
     def _is_escape_key(self, key) -> bool:
@@ -203,21 +220,10 @@ class AutocompleteService:
             if not self.helper.is_ready():
                 print("[ERROR] LyX is not accessible")
                 return
-            
             success = self.helper.apply_suggestion(self.current_prefix, replacement)
             
             if success:
                 print("[OK] Suggestion applied!")
-                # Remove the numeric key the user pressed to choose the option
-                # so that it doesn't remain in the LyX document.
-                try:
-                    # Small delay to let the insertion complete
-                    import time
-                    time.sleep(0.05)
-                    self.lyx_client.delete_backward(1)
-                    print("[DEBUG] Deleted selection digit from LyX")
-                except Exception as e:
-                    print(f"[WARNING] Failed to delete selection digit: {e}")
                 # Clear buffer after successful application
                 self.keystroke_buffer = ""
             else:
@@ -233,7 +239,7 @@ class AutocompleteService:
         if not self.current_suggestions:
             return
         
-        print("\n[Suggestions - Press 1-5 to select, ESC to cancel]")
+        print("\n[Suggestions - Press F1-F5 to select, ESC to cancel]")
         for i, (display, _) in enumerate(self.current_suggestions[:5]):
             marker = "→ " if i == self.selected_index else "  "
             print(f"{marker}{i+1}. {display}")
