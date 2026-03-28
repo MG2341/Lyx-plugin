@@ -41,6 +41,10 @@ class AutocompleteService:
         # Current suggestions
         self.current_suggestions: List[Tuple[str, str]] = []
         self.selected_index = 0
+
+        # Special function key to clear the keystroke buffer when pressed
+        # Default: F9
+        self.clear_buffer_key = keyboard.Key.f9 if keyboard is not None else None
     
     def start(self) -> None:
         """Start the autocomplete service."""
@@ -106,10 +110,20 @@ class AutocompleteService:
                     print("[Selection Mode Cancelled]")
                 
                 # Track regular keystrokes for buffer (only if NOT in selection mode)
-                elif not self.is_selection_mode and hasattr(key, 'char') and key.char:
-                    self.keystroke_buffer += key.char
-                    self.last_keystroke_time = time.time()
-                    print(f"[DEBUG] Keystroke: '{key.char}', buffer: '{self.keystroke_buffer}'")
+                elif not self.is_selection_mode:
+                    # Clear-buffer key (function key, e.g. F9)
+                    if (
+                        keyboard is not None
+                        and isinstance(key, keyboard.Key)
+                        and key == self.clear_buffer_key
+                    ):
+                        self.keystroke_buffer = ""
+                        print("[DEBUG] Buffer cleared via F9")
+                    # Normal character input goes into the buffer
+                    elif hasattr(key, 'char') and key.char:
+                        self.keystroke_buffer += key.char
+                        self.last_keystroke_time = time.time()
+                        print(f"[DEBUG] Keystroke: '{key.char}', buffer: '{self.keystroke_buffer}'")
             
             except Exception as e:
                 print(f"Error in keyboard handler: {e}")

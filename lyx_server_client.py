@@ -91,17 +91,13 @@ class LyXServerClient:
         return False
     
     def insert_text(self, text: str) -> bool:
-        """Insert text at cursor position - one character at a time."""
-        import time
-        success = True
-        for char in text:
-            # Use the proper LyX format for self-insert
-            escaped = self._escape_for_lyx(char)
-            if not self.send_command('self-insert', escaped):
-                print(f"Warning: Failed to insert character '{char}'")
-                success = False
-            time.sleep(0.05)  # Small delay between characters for LyX to process
-        return success
+        """Insert text at cursor position in a single self-insert call."""
+        try:
+            escaped = self._escape_for_lyx(text)
+            return self.send_command('self-insert', escaped)
+        except Exception as e:
+            print(f"[ERROR] Failed to insert text '{text}': {e}")
+            return False
     
     def insert_math(self, latex_code: str) -> bool:
         """Insert math expression at cursor position."""
