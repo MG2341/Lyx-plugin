@@ -42,6 +42,10 @@ class AutocompleteService:
         self.current_suggestions: List[Tuple[str, str]] = []
         self.selected_index = 0
 
+        # AI prediction state (background Hugging Face model suggestions)
+        self.ai_thread: Optional[threading.Thread] = None
+        self.ai_cancel_event = threading.Event()
+
         # Special function key to clear the keystroke buffer when pressed
         # Default: F9
         self.clear_buffer_key = keyboard.Key.f9 if keyboard is not None else None
@@ -121,6 +125,14 @@ class AutocompleteService:
                         print("[DEBUG] Buffer cleared via F9")
                     # Normal character input goes into the buffer
                     elif hasattr(key, 'char') and key.char:
+                        # If the user types while an AI prediction is running,
+                        # request cancellation of the current prediction.
+                        try:
+                            if self.ai_cancel_event is not None:
+                                self.ai_cancel_event.set()
+                        except Exception:
+                            pass
+
                         self.keystroke_buffer += key.char
                         self.last_keystroke_time = time.time()
                         print(f"[DEBUG] Keystroke: '{key.char}', buffer: '{self.keystroke_buffer}'")
@@ -219,6 +231,17 @@ class AutocompleteService:
         
         # Display suggestions
         self._show_suggestions()
+
+        # Kick off an asynchronous AI-based suggestion using the last
+        # 100 characters of the buffer as context. The AI worker will
+        # be cancelled automatically if the user continues typing while
+        # it is running.
+        try:
+            context_tail = self.keystroke_buffer[-100:] if self.keystroke_buffer else ""
+            if context_tail:
+                self._start_ai_suggestion(self.current_prefix, context_tail)
+        except Exception as e:
+            print(f"[AI][ERROR] Failed to start AI suggestion: {e}")
     
     def apply_selected_suggestion(self, index: int) -> None:
         """Apply a selected suggestion to LyX."""
@@ -257,6 +280,67 @@ class AutocompleteService:
         for i, (display, _) in enumerate(self.current_suggestions[:5]):
             marker = "→ " if i == self.selected_index else "  "
             print(f"{marker}{i+1}. {display}")
+
+    def _start_ai_suggestion(self, prefix: str, context_text: str) -> None:
+        """Start a background AI prediction based on the given context.
+
+        The prediction runs in a separate thread and, once finished,
+        adds an "AI:" suggestion at the top of the suggestions list,
+        unless the user has typed again in the meantime or explicitly
+        cancelled the prediction.
+        """
+
+        # Cancel any existing prediction
+        try:
+            if self.ai_thread is not None and self.ai_thread.is_alive():
+                self.ai_cancel_event.set()
+        except Exception:
+            pass
+
+        # Reset cancellation flag for the new prediction
+        self.ai_cancel_event = threading.Event()
+        start_time = time.time()
+
+        def worker() -> None:
+            try:
+                from ai_prediction import get_ai_prediction
+            except ImportError as exc:
+                print(
+                    "[AI][ERROR] transformers not installed; "
+                    "AI-based suggestions are disabled. Install with "
+                    "'pip install transformers torch'."
+                )
+                print(f"[AI][DEBUG] Import error: {exc}")
+                return
+
+            # Generate the continuation; this is cancellable via
+            # self.ai_cancel_event which is checked inside
+            # get_ai_prediction.
+            prediction = get_ai_prediction(context_text, cancel_event=self.ai_cancel_event)
+
+            # If cancelled or empty, do nothing
+            if not prediction or self.ai_cancel_event.is_set():
+                return
+
+            # If the user has typed after the prediction started,
+            # discard the result to avoid stale completions.
+            if self.last_keystroke_time > start_time:
+                print("[AI][DEBUG] Discarding stale AI suggestion due to new typing.")
+                return
+
+            display = f"AI: {prediction}"
+            replacement = prediction
+
+            # Insert AI suggestion at the top so it appears as option 1
+            try:
+                self.current_suggestions.insert(0, (display, replacement))
+                self._show_suggestions()
+                print("[AI] New AI suggestion added as option 1.")
+            except Exception as exc:
+                print(f"[AI][ERROR] Failed to add AI suggestion: {exc}")
+
+        self.ai_thread = threading.Thread(target=worker, daemon=True)
+        self.ai_thread.start()
     
     def run_interactive_mode(self) -> None:
         """Run in interactive mode for testing without keyboard listener."""
