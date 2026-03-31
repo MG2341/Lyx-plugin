@@ -14,6 +14,13 @@ try:
 except ImportError:
     keyboard = None
 
+# Windows-only: used to detect whether the foreground window is LyX so we
+# only record keystrokes coming from LyX itself.
+try:
+    import win32gui  # type: ignore
+except ImportError:
+    win32gui = None  # type: ignore
+
 
 from autocomplete_engine import AutocompleteEngine
 from lyx_server_client import LyXServerClient, LyXAutocompleteHelper
@@ -115,6 +122,12 @@ class AutocompleteService:
                 
                 # Track regular keystrokes for buffer (only if NOT in selection mode)
                 elif not self.is_selection_mode:
+                    # Only capture keystrokes when the active window appears
+                    # to be LyX. This prevents keys typed in other programs
+                    # (terminal, browser, etc.) from polluting the buffer.
+                    if not self._is_lyx_window_active():
+                        return
+
                     # Clear-buffer key (function key, e.g. F9)
                     if (
                         keyboard is not None
@@ -123,8 +136,22 @@ class AutocompleteService:
                     ):
                         self.keystroke_buffer = ""
                         print("[DEBUG] Buffer cleared via F9")
-                    # Normal character input goes into the buffer
-                    elif hasattr(key, 'char') and key.char:
+                    # Whitespace keys (e.g. Space) should also be reflected
+                    # in the buffer so that the context mirrors what the user
+                    # is actually typing.
+                    elif isinstance(key, keyboard.Key) and key == keyboard.Key.space:
+                        try:
+                            if self.ai_cancel_event is not None:
+                                self.ai_cancel_event.set()
+                        except Exception:
+                            pass
+
+                        self.keystroke_buffer += " "
+                        self.last_keystroke_time = time.time()
+                        print(f"[DEBUG] Keystroke: ' ', buffer: '{self.keystroke_buffer}'")
+
+                    # Normal character input (letters, digits, punctuation) goes into the buffer
+                    elif hasattr(key, 'char') and key.char is not None:
                         # If the user types while an AI prediction is running,
                         # request cancellation of the current prediction.
                         try:
@@ -146,6 +173,26 @@ class AutocompleteService:
         
         listener = keyboard.Listener(on_press=on_press, on_release=on_release)
         listener.start()
+
+    def _is_lyx_window_active(self) -> bool:
+        """Return True if the current foreground window looks like LyX.
+
+        Requires pywin32 (win32gui). If win32gui is not available, we
+        conservatively return True so the service still works, but the
+        buffer will then include global keystrokes as before.
+        """
+        if win32gui is None:
+            # No OS-level window information; fall back to old behavior.
+            return True
+
+        try:
+            hwnd = win32gui.GetForegroundWindow()
+            title = win32gui.GetWindowText(hwnd) or ""
+            # Heuristic: LyX window titles usually contain the word "LyX".
+            return "lyx" in title.lower()
+        except Exception:
+            # On any error, don't block suggestions; behave like before.
+            return True
     
     def _is_ctrl_backslash(self, key) -> bool:
         """Check if the pressed key is F8 (trigger key)."""
@@ -216,21 +263,21 @@ class AutocompleteService:
             print("Type at least 1 character to get suggestions")
             return
         
+        # First, get built-in (dictionary/text/LaTeX) suggestions
         suggestions = self.engine.get_suggestions(prefix)
-        
-        if not suggestions:
-            print(f"No suggestions for '{prefix}'")
-            self.keystroke_buffer = ""
-            return
-        
-        # Store suggestions and enter selection mode
-        self.current_suggestions = suggestions
+
+        # Store prefix and enter selection mode; suggestions may be empty
+        # initially if only AI-based suggestions are available.
         self.current_prefix = prefix
         self.selected_index = 0
+        self.current_suggestions = suggestions or []
         self.is_selection_mode = True
-        
-        # Display suggestions
-        self._show_suggestions()
+
+        if suggestions:
+            # Display built-in suggestions immediately
+            self._show_suggestions()
+        else:
+            print(f"No built-in suggestions for '{prefix}', asking AI...")
 
         # Kick off an asynchronous AI-based suggestion using the last
         # 100 characters of the buffer as context. The AI worker will
